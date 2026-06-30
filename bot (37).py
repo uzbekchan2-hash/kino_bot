@@ -1,117 +1,117 @@
-import sqlite3
+import datetime
 import telebot
 from telebot import types
-from config import BOT_TOKEN, ADMINS, CHANNELS, DB_NAME
+from flask import Flask, request
+from pymongo import MongoClient, ASCENDING
+from pymongo.errors import DuplicateKeyError
 
-bot = telebot.TeleBot(BOT_TOKEN)
+from config import (
+    BOT_TOKEN, MONGO_URI, MONGO_DB_NAME, WEBHOOK_HOST, PORT,
+    ADMINS, ADMIN_USERNAME, CHANNELS,
+)
+
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
+app = Flask(__name__)
 
 # Admin "kino qo'shish" jarayoni uchun vaqtinchalik xotira (state machine)
 user_states = {}
 
+# ============================== MONGODB ==============================
+client = MongoClient(MONGO_URI)
+db = client[MONGO_DB_NAME]
+movies_col = db["movies"]
+users_col = db["users"]
 
-# ============================== DATABASE ==============================
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS movies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            movie_id TEXT UNIQUE NOT NULL,
-            title TEXT NOT NULL,
-            file_id TEXT NOT NULL,
-            added_date TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            joined_date TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+movies_col.create_index([("movie_id", ASCENDING)], unique=True)
 
 
+# ============================== DATABASE FUNKSIYALARI ==============================
 def add_user(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-    conn.commit()
-    conn.close()
+    users_col.update_one(
+        {"_id": user_id},
+        {"$setOnInsert": {
+            "joined_date": datetime.datetime.utcnow(),
+            "is_premium": False,
+            "premium_until": None,
+        }},
+        upsert=True,
+    )
 
 
 def get_all_users():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users")
-    rows = cur.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
+    return [u["_id"] for u in users_col.find({}, {"_id": 1})]
 
 
-def add_movie(movie_id, title, file_id):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
+def add_movie(movie_id, title, file_id, is_premium=False):
     try:
-        cur.execute(
-            "INSERT INTO movies (movie_id, title, file_id) VALUES (?, ?, ?)",
-            (movie_id, title, file_id),
-        )
-        conn.commit()
-        ok = True
-    except sqlite3.IntegrityError:
-        ok = False
-    conn.close()
-    return ok
+        movies_col.insert_one({
+            "movie_id": movie_id,
+            "title": title,
+            "file_id": file_id,
+            "is_premium": is_premium,
+            "added_date": datetime.datetime.utcnow(),
+        })
+        return True
+    except DuplicateKeyError:
+        return False
 
 
 def delete_movie(movie_id):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("DELETE FROM movies WHERE movie_id = ?", (movie_id,))
-    changed = cur.rowcount
-    conn.commit()
-    conn.close()
-    return changed > 0
+    result = movies_col.delete_one({"movie_id": movie_id})
+    return result.deleted_count > 0
 
 
 def get_movie_by_id(movie_id):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT movie_id, title, file_id FROM movies WHERE movie_id = ?", (movie_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
+    return movies_col.find_one({"movie_id": movie_id})
 
 
 def search_movies_by_title(text):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT movie_id, title, file_id FROM movies WHERE title LIKE ? LIMIT 20",
-        (f"%{text}%",),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+    return list(movies_col.find({"title": {"$regex": text, "$options": "i"}}).limit(20))
 
 
 def get_movies_count():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM movies")
-    count = cur.fetchone()[0]
-    conn.close()
-    return count
+    return movies_col.count_documents({})
 
 
 def get_users_count():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM users")
-    count = cur.fetchone()[0]
-    conn.close()
-    return count
+    return users_col.count_documents({})
+
+
+def get_premium_count():
+    return users_col.count_documents({"is_premium": True})
+
+
+def set_premium(user_id, days):
+    until = datetime.datetime.utcnow() + datetime.timedelta(days=days)
+    users_col.update_one(
+        {"_id": user_id},
+        {"$set": {"is_premium": True, "premium_until": until}},
+        upsert=True,
+    )
+    return until
+
+
+def remove_premium(user_id):
+    users_col.update_one({"_id": user_id}, {"$set": {"is_premium": False, "premium_until": None}})
+
+
+def is_premium_user(user_id):
+    if is_admin(user_id):
+        return True
+    user = users_col.find_one({"_id": user_id})
+    if not user or not user.get("is_premium"):
+        return False
+    until = user.get("premium_until")
+    if until and until > datetime.datetime.utcnow():
+        return True
+    # muddati tugagan bo'lsa, avtomatik o'chiramiz
+    remove_premium(user_id)
+    return False
+
+
+def get_premium_until(user_id):
+    user = users_col.find_one({"_id": user_id})
+    return user.get("premium_until") if user else None
 
 
 # ============================== YORDAMCHI ==============================
@@ -120,7 +120,9 @@ def is_admin(user_id):
 
 
 def check_subscription(user_id):
-    """Foydalanuvchi BARCHA majburiy kanallarga obuna bo'lganmi tekshiradi"""
+    """Premium foydalanuvchi va adminlar majburiy obunadan ozod"""
+    if is_premium_user(user_id):
+        return True
     for channel in CHANNELS:
         try:
             member = bot.get_chat_member(channel["id"], user_id)
@@ -143,16 +145,29 @@ def send_subscription_message(chat_id):
     bot.send_message(
         chat_id,
         "🔒 <b>Botdan foydalanish uchun quyidagi kanal(lar)ga obuna bo'ling!</b>\n\n"
-        "Obuna bo'lgach, pastdagi \"✅ Obuna bo'ldim\" tugmasini bosing.",
+        "Obuna bo'lgach, pastdagi \"✅ Obuna bo'ldim\" tugmasini bosing.\n\n"
+        "💎 <i>Premium foydalanuvchilar majburiy obunasiz foydalanishi mumkin.</i>",
         parse_mode="HTML",
         reply_markup=subscription_keyboard(),
     )
 
 
-def send_movie(chat_id, movie):
-    movie_id, title, file_id = movie
-    caption = f"🎬 <b>{title}</b>\n🆔 Kino kodi: <code>{movie_id}</code>"
-    bot.send_video(chat_id, file_id, caption=caption, parse_mode="HTML")
+def send_movie(chat_id, user_id, movie):
+    if movie.get("is_premium") and not is_premium_user(user_id):
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton(text="💎 Premium olish", url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}"))
+        bot.send_message(
+            chat_id,
+            "💎 <b>Bu kino faqat Premium foydalanuvchilar uchun!</b>\n\n"
+            f"Premium olish uchun {ADMIN_USERNAME} ga murojaat qiling.",
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+        return
+
+    badge = "💎 PREMIUM" if movie.get("is_premium") else "🎬"
+    caption = f"{badge} <b>{movie['title']}</b>\n🆔 Kino kodi: <code>{movie['movie_id']}</code>"
+    bot.send_video(chat_id, movie["file_id"], caption=caption, parse_mode="HTML")
 
 
 # ============================== FOYDALANUVCHI BUYRUQLARI ==============================
@@ -164,13 +179,42 @@ def cmd_start(message):
         send_subscription_message(message.chat.id)
         return
 
+    status = "💎 <b>Siz Premium foydalanuvchisiz!</b>\n\n" if is_premium_user(message.from_user.id) else ""
     bot.send_message(
         message.chat.id,
-        "🎥 <b>Kino botga xush kelibsiz!</b>\n\n"
+        f"{status}🎥 <b>Kino botga xush kelibsiz!</b>\n\n"
         "Kino topish uchun kino <b>kodini</b> yoki <b>nomini</b> yuboring.\n\n"
-        "Masalan: <code>1</code> yoki <i>Avengers</i>",
+        "Masalan: <code>1</code> yoki <i>Avengers</i>\n\n"
+        "💎 Premium haqida: /premium",
         parse_mode="HTML",
     )
+
+
+@bot.message_handler(commands=["premium"])
+def cmd_premium_status(message):
+    user_id = message.from_user.id
+    if is_premium_user(user_id):
+        until = get_premium_until(user_id)
+        until_str = until.strftime("%Y-%m-%d") if until else "♾ cheksiz"
+        bot.send_message(
+            message.chat.id,
+            f"💎 <b>Siz Premium foydalanuvchisiz!</b>\n📅 Muddati: <code>{until_str}</code>\n\n"
+            "✅ Majburiy obunasiz foydalanish\n✅ VIP kinolarga kirish",
+            parse_mode="HTML",
+        )
+    else:
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton(text="💎 Premium sotib olish", url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}"))
+        bot.send_message(
+            message.chat.id,
+            "💎 <b>Premium imkoniyatlari:</b>\n\n"
+            "✅ Majburiy obunasiz foydalanish\n"
+            "✅ VIP kinolarga maxsus kirish\n"
+            "✅ Tezroq va qulayroq xizmat\n\n"
+            f"Sotib olish uchun {ADMIN_USERNAME} ga yozing.",
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "check_sub")
@@ -190,11 +234,11 @@ def callback_get_movie(call):
     movie_id = call.data.split(":", 1)[1]
     movie = get_movie_by_id(movie_id)
     if movie:
-        send_movie(call.message.chat.id, movie)
+        send_movie(call.message.chat.id, call.from_user.id, movie)
     bot.answer_callback_query(call.id)
 
 
-# ============================== ADMIN BUYRUQLARI ==============================
+# ============================== ADMIN: KINO BOSHQARUVI ==============================
 @bot.message_handler(commands=["add"])
 def cmd_add(message):
     if not is_admin(message.from_user.id):
@@ -224,7 +268,10 @@ def cmd_stats(message):
         return
     bot.send_message(
         message.chat.id,
-        f"📊 <b>Statistika</b>\n\n🎬 Kinolar soni: {get_movies_count()}\n👥 Foydalanuvchilar soni: {get_users_count()}",
+        f"📊 <b>Statistika</b>\n\n"
+        f"🎬 Kinolar soni: {get_movies_count()}\n"
+        f"👥 Foydalanuvchilar soni: {get_users_count()}\n"
+        f"💎 Premium foydalanuvchilar: {get_premium_count()}",
         parse_mode="HTML",
     )
 
@@ -245,6 +292,56 @@ def cmd_broadcast(message):
         except Exception:
             fail += 1
     bot.send_message(message.chat.id, f"✅ Yuborildi: {success}\n❌ Yuborilmadi: {fail}")
+
+
+# ============================== ADMIN: PREMIUM BOSHQARUVI ==============================
+@bot.message_handler(commands=["addpremium"])
+def cmd_add_premium(message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+        bot.send_message(message.chat.id, "❗ Foydalanish: /addpremium <user_id> <kun_soni>")
+        return
+    user_id, days = int(parts[1]), int(parts[2])
+    until = set_premium(user_id, days)
+    bot.send_message(message.chat.id, f"💎 {user_id} ga {days} kunlik Premium berildi (tugash sanasi: {until.strftime('%Y-%m-%d')})")
+    try:
+        bot.send_message(user_id, f"🎉 Sizga {days} kunlik 💎 Premium status berildi!\n\nKo'rish: /premium")
+    except Exception:
+        pass
+
+
+@bot.message_handler(commands=["delpremium"])
+def cmd_del_premium(message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        bot.send_message(message.chat.id, "❗ Foydalanish: /delpremium <user_id>")
+        return
+    remove_premium(int(parts[1]))
+    bot.send_message(message.chat.id, f"❌ {parts[1]} uchun Premium bekor qilindi.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("movietype:"))
+def callback_movie_type(call):
+    user_id = call.from_user.id
+    state = user_states.get(user_id)
+    if not state or state["step"] != "waiting_type" or not is_admin(user_id):
+        return
+
+    is_premium = call.data.split(":", 1)[1] == "premium"
+    data = state["data"]
+    add_movie(data["movie_id"], data["title"], data["file_id"], is_premium=is_premium)
+
+    type_text = "💎 Premium (VIP)" if is_premium else "🎬 Oddiy"
+    bot.edit_message_text(
+        f"✅ Kino qo'shildi!\n\n🆔 Kod: {data['movie_id']}\n📝 Nomi: {data['title']}\n🏷 Turi: {type_text}",
+        call.message.chat.id, call.message.message_id,
+    )
+    user_states.pop(user_id, None)
+    bot.answer_callback_query(call.id)
 
 
 # ============================== ASOSIY MESSAGE HANDLER ==============================
@@ -268,13 +365,13 @@ def handle_message(message):
         return
 
     if message.content_type != "text":
-        return  # video/document holatdan tashqari e'tiborsiz qoldiriladi
+        return
 
     text = message.text.strip()
     if text.startswith("/"):
-        return  # buyruqlar yuqorida alohida ushlanadi
+        return
 
-    # ---- ADMIN: ID KIRITISH BOSQICHI ----
+    # ---- ADMIN: ID KIRITISH ----
     if state and state["step"] == "waiting_id" and is_admin(user_id):
         if get_movie_by_id(text):
             bot.send_message(message.chat.id, "❗ Bu kod band. Boshqa kod kiriting:")
@@ -284,16 +381,16 @@ def handle_message(message):
         bot.send_message(message.chat.id, "📝 Endi kino nomini kiriting:")
         return
 
-    # ---- ADMIN: NOM KIRITISH BOSQICHI ----
+    # ---- ADMIN: NOM KIRITISH ----
     if state and state["step"] == "waiting_title" and is_admin(user_id):
-        data = state["data"]
-        add_movie(data["movie_id"], text, data["file_id"])
-        bot.send_message(
-            message.chat.id,
-            f"✅ Kino qo'shildi!\n\n🆔 Kod: <code>{data['movie_id']}</code>\n📝 Nomi: {text}",
-            parse_mode="HTML",
+        state["data"]["title"] = text
+        state["step"] = "waiting_type"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(
+            types.InlineKeyboardButton(text="🎬 Oddiy", callback_data="movietype:normal"),
+            types.InlineKeyboardButton(text="💎 Premium (VIP)", callback_data="movietype:premium"),
         )
-        user_states.pop(user_id, None)
+        bot.send_message(message.chat.id, "🏷 Kino turini tanlang:", reply_markup=markup)
         return
 
     # ---- ODDIY FOYDALANUVCHI: QIDIRUV ----
@@ -303,30 +400,48 @@ def handle_message(message):
         send_subscription_message(message.chat.id)
         return
 
-    # avval ID (kod) bo'yicha qidiramiz
     movie = get_movie_by_id(text)
     if movie:
-        send_movie(message.chat.id, movie)
+        send_movie(message.chat.id, user_id, movie)
         return
 
-    # topilmasa, nomi bo'yicha qidiramiz
     results = search_movies_by_title(text)
     if not results:
         bot.send_message(message.chat.id, "😔 Hech narsa topilmadi. Kodni yoki nomni tekshirib qayta yuboring.")
         return
 
     if len(results) == 1:
-        send_movie(message.chat.id, results[0])
+        send_movie(message.chat.id, user_id, results[0])
         return
 
     markup = types.InlineKeyboardMarkup()
-    for movie_id, title, _ in results:
-        markup.add(types.InlineKeyboardButton(text=f"🎬 {title}", callback_data=f"get_movie:{movie_id}"))
+    for m in results:
+        label = ("💎 " if m.get("is_premium") else "🎬 ") + m["title"]
+        markup.add(types.InlineKeyboardButton(text=label, callback_data=f"get_movie:{m['movie_id']}"))
     bot.send_message(message.chat.id, "🔍 Quyidagi natijalar topildi:", reply_markup=markup)
 
 
-# ============================== ISHGA TUSHIRISH ==============================
+# ============================== FLASK WEBHOOK (RENDER UCHUN) ==============================
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def telegram_webhook():
+    json_str = request.get_data().decode("utf-8")
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "OK", 200
+
+
+@app.route("/")
+def index():
+    return "🎬 Kino bot ishlayapti ✅", 200
+
+
+def setup_webhook():
+    bot.remove_webhook()
+    bot.set_webhook(url=f"{WEBHOOK_HOST}/{BOT_TOKEN}")
+
+
+# Modul import qilinganda ham (gunicorn orqali) webhook o'rnatiladi
+setup_webhook()
+
 if __name__ == "__main__":
-    init_db()
-    print("Bot ishga tushdi...")
-    bot.infinity_polling(skip_pending=True)
+    app.run(host="0.0.0.0", port=PORT)
