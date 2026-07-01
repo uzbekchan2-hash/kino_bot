@@ -20,14 +20,14 @@ PORT = int(os.getenv("PORT", 10000))
 
 # Admin(lar) Telegram ID raqami (@userinfobot orqali bilib olasiz)
 ADMINS = [
-    123456789,
+    123456789,6900728549
 ]
 
 # Premium haqida savol/murojaat uchun admin username (@siz)
-ADMIN_USERNAME = "@admin_username"
+ADMIN_USERNAME = "@cxvcxvw"
 
 # Majburiy obuna kanallari (Premium foydalanuvchilar bundan ozod bo'ladi)
 CHANNELS = [
-    {"id": "@kanal_username1", "url": "https://t.me/kanal_username1", "name": "1-kanal"},
-    {"id": "@kanal_username2", "url": "https://t.me/kanal_username2", "name": "2-kanal"},
+    {"id": "@roblox_chat_veko", "url": "https://t.me/roblox_chat_veko", "name": "obona boling"},
+    {"id": "@trade_chanel_uz", "url": "https://t.me/trade_chanel_uz", "name": "obuna boling"},
 ]
