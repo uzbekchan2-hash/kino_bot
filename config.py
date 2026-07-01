@@ -1,33 +1,72 @@
 import os
+import sys
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+log = logging.getLogger("config")
 
 # ============================================================
 #  SOZLAMALAR FAYLI
-#  Render'da bularni "Environment Variables" qismida kiritasiz,
-#  lokal test uchun esa pastdagi default qiymatlarni o'zgartiring
+#  Maxfiy narsalar (BOT_TOKEN, MONGO_URI) Render Environment
+#  Variables orqali beriladi. ADMINS va CHANNELS uchun esa
+#  pastda TO'G'RIDAN-TO'G'RI qiymat qo'yilgan — xohlasangiz
+#  shu yerdan o'zgartiring, xohlasangiz Render'dan ustidan
+#  yozdirishingiz ham mumkin (ENV bo'sh bo'lmasa ENV ustun bo'ladi).
 # ============================================================
 
-# @BotFather dan olingan bot tokeningiz
-BOT_TOKEN = os.getenv("BOT_TOKEN", "BOT_TOKEN_BU_YERGA")
+def _get_env(name, default=None, required=False):
+    value = os.getenv(name, default)
+    if value is not None:
+        value = str(value).strip()
+    if required and not value:
+        log.error("MUHIM XATO: '%s' environment variable topilmadi! Render → Environment bo'limida qo'shing.", name)
+        sys.exit(1)
+    return value
 
-# MongoDB Atlas ulanish manzili (mongodb+srv://login:parol@cluster...)
-MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://USER:PAROL@cluster0.mongodb.net/")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "kino_bot")
 
-# Render avtomatik beradigan tashqi havola (RENDER_EXTERNAL_URL)
-# Render Web Service yaratganda bu o'zi to'g'ri keladi, lokal test uchun qo'lda yozing
-WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://sizning-app-nomi.onrender.com")
-PORT = int(os.getenv("PORT", 10000))
+# ---- Majburiy qiymatlar (Render Environment Variables'dan) ----
+BOT_TOKEN = _get_env("BOT_TOKEN", required=True)
+MONGO_URI = _get_env("MONGO_URI", required=True)
+MONGO_DB_NAME = _get_env("MONGO_DB_NAME", default="kino_bot")
 
-# Admin(lar) Telegram ID raqami (@userinfobot orqali bilib olasiz)
-ADMINS = [
-    8866852203,6900728549
-]
+# Render "RENDER_EXTERNAL_URL" ni o'zi avtomatik beradi.
+WEBHOOK_HOST = _get_env("RENDER_EXTERNAL_URL") or _get_env("WEBHOOK_URL")
+if WEBHOOK_HOST:
+    WEBHOOK_HOST = WEBHOOK_HOST.rstrip("/")
 
-# Premium haqida savol/murojaat uchun admin username (@siz)
-ADMIN_USERNAME = "@cxvcxvw"
+PORT = int(_get_env("PORT", default="10000"))
+WEBHOOK_SECRET = _get_env("WEBHOOK_SECRET", default="kino_bot_secret")
 
-# Majburiy obuna kanallari (Premium foydalanuvchilar bundan ozod bo'ladi)
-CHANNELS = [
-    {"id": "@uzbekroblox", "url": "https://t.me/uzbekroblox", "name": "obona boling"},
-    {"id": "@trade_chanel_uz", "url": "https://t.me/trade_chanel_uz", "name": "obuna boling"},
-]
+# ---- ADMIN(LAR) ----
+# Standart admin — siz bergan ID. Kerak bo'lsa Render'da ADMINS="id1,id2" deb qo'shsangiz bo'ladi.
+DEFAULT_ADMINS = "8866852203"
+_admins_raw = _get_env("ADMINS", default=DEFAULT_ADMINS)
+ADMINS = []
+for part in _admins_raw.split(","):
+    part = part.strip()
+    if part.isdigit():
+        ADMINS.append(int(part))
+if not ADMINS:
+    log.warning("OGOHLANTIRISH: ADMINS bo'sh! Hech kim admin buyruqlaridan foydalana olmaydi.")
+
+ADMIN_USERNAME = _get_env("ADMIN_USERNAME", default="admin")
+
+# ---- MAJBURIY OBUNA KANALLARI ----
+# Standart 2 ta kanal siz bergan. Render'da CHANNELS="kanal1,kanal2" deb qo'yib ustidan yozdirsa bo'ladi.
+DEFAULT_CHANNELS = "uzbekroblox,trade_chanel_uz"
+_channels_raw = _get_env("CHANNELS", default=DEFAULT_CHANNELS)
+CHANNELS = []
+for part in _channels_raw.split(","):
+    part = part.strip()
+    if part:
+        username = part if part.startswith("@") else f"@{part}"
+        CHANNELS.append({
+            "id": username,
+            "url": f"https://t.me/{username.lstrip('@')}",
+            "name": username,
+        })
+
+log.info("Sozlamalar yuklandi: adminlar=%s | kanallar=%s", ADMINS, [c["id"] for c in CHANNELS])
