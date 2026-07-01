@@ -28,6 +28,6 @@ ADMIN_USERNAME = "@cxvcxvw"
 
 # Majburiy obuna kanallari (Premium foydalanuvchilar bundan ozod bo'ladi)
 CHANNELS = [
-    {"id": "@roblox_chat_veko", "url": "https://t.me/roblox_chat_veko", "name": "obona boling"},
+    {"id": "@uzbekroblox", "url": "https://t.me/uzbekroblox", "name": "obona boling"},
     {"id": "@trade_chanel_uz", "url": "https://t.me/trade_chanel_uz", "name": "obuna boling"},
 ]
