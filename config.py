@@ -20,7 +20,7 @@ PORT = int(os.getenv("PORT", 10000))
 
 # Admin(lar) Telegram ID raqami (@userinfobot orqali bilib olasiz)
 ADMINS = [
-    123456789,6900728549
+    8866852203,6900728549
 ]
 
 # Premium haqida savol/murojaat uchun admin username (@siz)
